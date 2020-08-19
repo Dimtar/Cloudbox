@@ -1,0 +1,88 @@
+#########################################################################
+# Title:         Cloudbox: jellyfin Role                                    #
+# Author(s):     desimaniac                                             #
+# URL:           https://github.com/cloudbox/cloudbox                   #
+# Docker Image:  jellyfin/jellyfinserver                                        #
+# --                                                                    #
+#         Part of the Cloudbox project: https://cloudbox.works          #
+#########################################################################
+#                   GNU General Public License v3.0                     #
+#########################################################################
+---
+- name: "Set DNS Record on CloudFlare"
+  include_role:
+    name: cloudflare-dns
+  vars:
+    subdomain: jellyfin
+  when: cloudflare_enabled
+
+- name: Create jellyfin directories
+  file: "path={{ item }} state=directory mode=0775 owner={{ user.name }} group={{ user.name }}"
+  with_items:
+    - /opt/jellyfin
+    - /opt/jellyfin/config
+    - /opt/jellyfin/config/users
+    - "{{ jellyfin.transcodes }}/jellyfin"
+
+- name: Stop and remove any existing container
+  docker_container:
+    name: jellyfin
+    state: absent
+
+- name: "Check if '/dev/dri' exists"
+  stat:
+    path: "/dev/dri"
+  register: dev_dri
+
+- name: Create and start container
+  docker_container:
+    name: jellyfin
+    image: "hotio/jellyfin:{{ jellyfin.version }}"
+    pull: yes
+    published_ports:
+      - "127.0.0.1:8096:8096"
+    env:
+      UID: "{{ uid }}"
+      GID: "{{ gid }}"
+      GIDLIST: "{{ vgid }}"
+      VIRTUAL_HOST: "jellyfin.{{ user.domain }}"
+      VIRTUAL_PORT: 8096
+      LETSENCRYPT_HOST: "jellyfin.{{ user.domain }}"
+      LETSENCRYPT_EMAIL: "{{ user.email }}"
+      HTTPS_METHOD: noredirect
+      NVIDIA_DRIVER_CAPABILITIES: "{{ 'compute,video,utility' if gpu.nvidia.enabled | default(false) else omit }}"
+      NVIDIA_VISIBLE_DEVICES: "{{ 'all' if gpu.nvidia.enabled | default(false) else omit }}"
+    volumes:
+      - "/etc/localtime:/etc/localtime:ro"
+      - "/opt/jellyfin:/config"
+      - "/mnt/unionfs/Media:/data"
+      - "/mnt:/mnt"
+      - "/tmp:/tmp"
+      - "/dev/shm:/dev/shm"
+      - "{{ jellyfin.transcodes }}/jellyfin:/transcode"
+    devices: "{{ '/dev/dri:/dev/dri' if (gpu.intel and dev_dri.stat.exists) | default(false) else omit }}"
+    labels:
+      "com.github.cloudbox.cloudbox_managed": "true"
+    networks:
+      - name: cloudbox
+        aliases:
+          - jellyfin
+    purge_networks: yes
+    restart_policy: unless-stopped
+    state: started
+
+# we need this here because sometimes after a restore, docker will set this transcodes folder to root, dont ask why, but it does...
+- name: "Wait 5 seconds"
+  wait_for:
+    timeout: 5
+
+- name: "Ensure transcodes folder has the correct permissions"
+  file:
+    path: "{{ jellyfin.transcodes }}"
+    owner: "{{ user.name }}"
+    group: "{{ user.name }}"
+    mode: 0775
+    recurse: yes
+
+- name: Settings Tasks
+  include_tasks: "subtasks/settings.yml"
